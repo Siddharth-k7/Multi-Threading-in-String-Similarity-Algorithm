@@ -75,3 +75,80 @@ static void buf_push(MatchBuf *b, long long v) {
     b->buf[b->count++] = v;
 }
 
+/* ---------------- Rabin-Karp scan (shared by serial & parallel) ---------------- */
+
+/*
+ * Scans window start positions i in [start, scan_stop) with i <= n - m.
+ * Every owned occurrence is reported: out[count] = start index of match.
+ * Returns the number of matches recorded.
+ */
+static long long rk_scan(const char *text, long long n, int m, const char *pattern,
+                         long long pattern_hash, long long highest_power,
+                         long long start, long long scan_stop,
+                         MatchBuf *out) {
+    long long count = 0;
+    long long last_i = n - (long long)m;          /* last valid window start */
+    if (scan_stop - 1 > last_i) scan_stop = last_i + 1;
+    if (start >= scan_stop) return 0;             /* nothing to do */
+
+    /* Initial window hash for text[start..start+m-1] */
+    long long window_hash = 0;
+    for (int j = 0; j < m; j++) {
+        window_hash = (HASH_BASE * window_hash + (unsigned char)text[start + j]) % HASH_MOD;
+    }
+
+    for (long long i = start; i < scan_stop; i++) {
+        if (window_hash == pattern_hash) {
+            /* Double-check to eliminate spurious hash collisions */
+            if (memcmp(&text[i], pattern, (size_t)m) == 0) {
+                buf_push(out, i);
+                count++;
+            }
+        }
+        if (i < scan_stop - 1) {
+            /* Roll the window: remove text[i], append text[i+m] */
+            long long lead = ((unsigned char)text[i]) * highest_power % HASH_MOD;
+            window_hash = (window_hash - lead + HASH_MOD) % HASH_MOD;
+            window_hash = (window_hash * HASH_BASE + (unsigned char)text[i + m]) % HASH_MOD;
+        }
+    }
+    return count;
+}
+
+/* ---------------- Parallel worker ---------------- */
+
+typedef struct {
+    int thread_id;
+    long long chunk_start;     /* first window START position owned by this thread */
+    long long chunk_end;       /* exclusive end of owned window START positions */
+    long long n;
+    int m;
+    long long pattern_hash;
+    long long highest_power;
+    const char *text;
+    const char *pattern;
+    MatchBuf matches;
+    int was_created;
+} ThreadData;
+
+static void *rk_worker(void *arg) {
+    ThreadData *d = (ThreadData *)arg;
+    d->matches.buf = NULL;
+    d->matches.count = 0;
+    d->matches.capacity = 0;
+    rk_scan(d->text, d->n, d->m, d->pattern, d->pattern_hash, d->highest_power,
+            d->chunk_start, d->chunk_end, &d->matches);
+    return NULL;
+}
+
+int main(int argc, char **argv) {
+    long long num_threads_req = argc > 1 ? atoll(argv[1]) : 4;
+    long long n               = argc > 2 ? atoll(argv[2]) : 1000000;
+    int m                     = argc > 3 ? atoi(argv[3]) : 5;
+    int reps                  = argc > 4 ? atoi(argv[4]) : 3;
+    int verify                = argc > 5 ? atoi(argv[5]) : 0;
+
+    if (num_threads_req < 1 || n < 1 || m < 1 || m > 256 || reps < 1) {
+        fprintf(stderr, "Usage: %s <num_threads> <N> [M] [reps] [verify]\n", argv[0]);
+        return 1;
+    }
