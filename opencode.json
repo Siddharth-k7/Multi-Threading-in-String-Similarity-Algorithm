@@ -1,0 +1,14 @@
+{
+	"$schema": "https://opencode.ai/config.json",
+	"username": "Siddharth-k7",
+	"mcp": {
+		"github": {
+			"type": "local",
+			"command": ["docker", "run", "-i", "--rm", "-p", "127.0.0.1:8085:8085", "-e", "GITHUB_OAUTH_CALLBACK_PORT", "ghcr.io/github/github-mcp-server"],
+			"enabled": true,
+			"environment": {
+				"GITHUB_OAUTH_CALLBACK_PORT": "8085"
+			}
+		}
+	}
+}
