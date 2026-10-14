@@ -318,3 +318,83 @@ void run_kmp_test(const char *test_title, const char *text, const char *pattern)
         }
     }
 
+    // Run sequential baseline for comparison
+    int *seq_matches = NULL;
+    int total_seq_matches = 0;
+    if (KMPsearch(text, n, pattern, m, lps, &seq_matches, &total_seq_matches) < 0) {
+        fprintf(stderr, "Error: Sequential KMP search failed.\n");
+    }
+
+    printf("\nCombined Multithreaded Matches : [ ");
+    for (int k = 0; k < total_parallel_matches; k++) {
+        printf("%d ", combined_matches[k]);
+    }
+    printf("]\n");
+
+    printf("Sequential Baseline Matches    : [ ");
+    for (int k = 0; k < total_seq_matches; k++) {
+        printf("%d ", seq_matches[k]);
+    }
+    printf("]\n");
+
+    // Verify exact match
+    bool is_correct = (total_parallel_matches == total_seq_matches);
+    if (is_correct) {
+        for (int k = 0; k < total_seq_matches; k++) {
+            if (combined_matches[k] != seq_matches[k]) {
+                is_correct = false;
+                break;
+            }
+        }
+    }
+
+    if (is_correct) {
+        printf("Verification: SUCCESS (Multithreaded matches match sequential matches exactly)\n");
+    } else {
+        printf("Verification: FAILURE (Mismatch detected between multithreaded and sequential)\n");
+    }
+    printf("=================================================================\n\n");
+
+    // Free all dynamically allocated memory
+    free(seq_matches);
+    free(combined_matches);
+    for (int i = 0; i < active_threads; i++) {
+        free(thread_data[i].local_matches);
+    }
+    free(lps);
+}
+
+int main(void) {
+    // 1. Primary test case specified in project requirements:
+    // Text: ABABDABABCABAB, Pattern: ABABC, Expected match: 5
+    run_kmp_test("Boundary Crossing Match",
+                 "ABABDABABCABAB",
+                 "ABABC");
+
+    // 2. Pattern at the very start of the text
+    run_kmp_test("Pattern at Start of Text",
+                 "ABABCDEFGHIJKL",
+                 "ABABC");
+
+    // 3. Pattern at the very end of the text
+    run_kmp_test("Pattern at End of Text",
+                 "DEFGHIJKLMABABC",
+                 "ABABC");
+
+    // 4. Pattern not found in text
+    run_kmp_test("No Match in Text",
+                 "ABABDABABDABAB",
+                 "XYZ");
+
+    // 5. Multiple matches across chunks
+    run_kmp_test("Multiple Matches Across Chunks",
+                 "ABABC_ABABC_ABABC",
+                 "ABABC");
+
+    // 6. Pattern longer than the text
+    run_kmp_test("Pattern Longer Than Text",
+                 "ABC",
+                 "ABCDEFG");
+
+    return 0;
+}
