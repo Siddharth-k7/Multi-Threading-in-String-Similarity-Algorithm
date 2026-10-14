@@ -158,3 +158,83 @@ void *threadKMPsearch(void *arg) {
 // Runs both multithreaded and sequential KMP on an input and verifies correctness
 void run_kmp_test(const char *test_title, const char *text, const char *pattern) {
     if (text == NULL || pattern == NULL) {
+        fprintf(stderr, "Error: Text or pattern is NULL.\n");
+        return;
+    }
+
+    int n = (int)strlen(text);
+    int m = (int)strlen(pattern);
+
+    printf("=================================================================\n");
+    printf("Test: %s\n", test_title);
+    printf("Text    : \"%s\" (Length: %d)\n", text, n);
+    printf("Pattern : \"%s\" (Length: %d)\n", pattern, m);
+
+    // If pattern is empty, nothing to search
+    if (m == 0) {
+        printf("Pattern is empty. Skipping.\n\n");
+        return;
+    }
+
+    // Build LPS array once for the pattern
+    int *lps = (int *)malloc((size_t)m * sizeof(int));
+    if (lps == NULL) {
+        fprintf(stderr, "Error: Memory allocation failed for LPS array.\n");
+        return;
+    }
+    buildLPS(pattern, m, lps);
+
+    printf("LPS     : [ ");
+    for (int k = 0; k < m; k++) {
+        printf("%d ", lps[k]);
+    }
+    printf("]\n\n");
+
+    // Adjust active threads if text is shorter than NUM_THREADS
+    int active_threads = NUM_THREADS;
+    if (n > 0 && n < active_threads) {
+        active_threads = n;
+    }
+    if (n == 0) {
+        active_threads = 1;
+    }
+
+    // Partition text among worker threads into contiguous, non-overlapping chunks
+    int base_chunk_size = (active_threads > 0) ? (n / active_threads) : 0;
+    int remainder = (active_threads > 0) ? (n % active_threads) : 0;
+
+    pthread_t threads[NUM_THREADS];
+    ThreadData thread_data[NUM_THREADS];
+
+    int current_start = 0;
+
+    printf("--- Thread Partitions and Overlaps ---\n");
+    for (int i = 0; i < active_threads; i++) {
+        int orig_len = base_chunk_size + (i < remainder ? 1 : 0);
+        int orig_start = current_start;
+        int orig_end = (orig_len > 0) ? (orig_start + orig_len - 1) : (orig_start - 1);
+        current_start += orig_len;
+
+        // Search region: extend by up to (m - 1) extra characters for non-final threads
+        int search_start = orig_start;
+        int search_end = orig_end;
+        if (orig_len > 0 && i < active_threads - 1) {
+            search_end = orig_end + (m - 1);
+            if (search_end >= n) {
+                search_end = (n > 0) ? (n - 1) : 0;
+            }
+        }
+
+        thread_data[i].thread_id = i;
+        thread_data[i].original_start = orig_start;
+        thread_data[i].original_end = orig_end;
+        thread_data[i].search_start = search_start;
+        thread_data[i].search_end = search_end;
+        thread_data[i].text = text;
+        thread_data[i].pattern = pattern;
+        thread_data[i].pattern_len = m;
+        thread_data[i].lps = lps;
+        thread_data[i].match_count = 0;
+        thread_data[i].match_capacity = 16;
+        thread_data[i].local_matches = (int *)malloc((size_t)thread_data[i].match_capacity * sizeof(int));
+        if (thread_data[i].local_matches == NULL) {
