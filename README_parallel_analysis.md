@@ -267,3 +267,92 @@ vs grain plots the granularity trade-off directly:
 * **Sweet-spot grain grows with N roughly proportionally:** G\* ≈ 83k for BM
   at N = 10⁶ but ≈ 416k at N = 10⁷ — i.e., the *grain* sweet spot is set by
   hardware (how long a chunk must be to amortize ~50–100 µs of create/join
+  cost and refill caches), not by the problem, so P\* = N / G\* grows with N
+  (12 → 24) while G\* stays 10⁵–10⁶ chars. Same shape seen for KMP/RK
+  (G\* shifts 166k → 416k and 41k → 833k).
+* **Boyer-Moore shows the widest flat bottom** (8–9 ms for any P from 6 to 64
+  at N = 10⁷): its irregular skipping averages out across chunk sizes, giving
+  a robust sweet spot — but its curve is also the *noisiest* grain-to-grain
+  (data-dependent imbalance, cf. §5 question 3).
+* **Efficiency reading:** at a *fixed common grain* of 100k chars/thread,
+  P is already past the sweet spot for N = 10⁷ (P = 64 (E = 0.04–0.06)) but
+  is *at* it for N = 10⁶ (P = 8 (E = 0.19–0.30)) — the same chunk is
+  "too fine" or "about right" depending on total problem size, exactly the
+  granularity insight: choose **P ≈ N / G\***, never the other way around.
+* **Rule of thumb from this machine (M = 5, 4 physical / 8 logical cores):**
+  pick grains of **≈ 10⁵–10⁶ characters per thread**; below ≈ 10⁴ chars/thread
+  thread management exceeds scanning work, above ≈ 10⁶ the core count — not
+  the grain — limits speedup (S caps ≈ 3.6–5×).
+
+A note on the ideal-speedup guide in the chart: the dashed line in the
+speedup panel is S = P = N/G, i.e., perfect linear speedup *at that grain*
+— a grain's efficiency is E = S / (N/G).
+
+---
+
+## 8. Throughput vs input size — all three algorithms
+
+Chart: **`fig_throughput.png`** (data: `throughput.csv`), built with:
+
+```bash
+python run_throughput.py       # M = 4 (short) & 32 (long) × N = 1e3..1e8 × P = 1,4,8,16,24,48
+python run_throughput.py --full   # also N = 1e9 (~1 GB RAM)
+python plot_throughput.py
+```
+
+Throughput is searchable bandwidth: **GB/s = N bytes / T (best-of-repetitions)**,
+plotted in the reference-figure layout — one row per pattern length
+(short = 4, long = 32), one column per algorithm (KMP | Rabin-Karp |
+Boyer-Moore), lines = sequential (black) + 4/8/16/24/48 threads.
+
+### Measured peaks (this machine, GB/s)
+
+| Pattern | algo | sequential peak | parallel peak | best config |
+|---|---|---:|---:|---|
+| short (4) | KMP | 0.21 | 0.57 | N = 10M, P = 48 |
+| short (4) | Rabin-Karp | 0.04 | 0.16 | N = 10M, P = 8 |
+| short (4) | Boyer-Moore | 0.66 | 0.99 | N = 100M, P = 24 |
+| long (32) | KMP | 0.17 | 0.54 | N = 100M, P = 48 |
+| long (32) | Rabin-Karp | 0.07 | 0.18 | N = 10M, P = 8 |
+| long (32) | Boyer-Moore | 1.47 | **3.07** | N = 100M, P = 16 |
+
+### Reading the curves (three regimes, same for all algorithms)
+
+1. **Tiny inputs (N ≤ ~30k): overhead-dominated.** Every curve sits below
+   ~0.1 GB/s; more threads only add creation cost, so the sequential line
+   briefly *wins* (identical to the granularity finding in §7).
+2. **Crossover (N ≈ 10⁵–10⁶): parallel threads start paying off**, each
+   added thread lifts throughput until the machine saturates.
+3. **Large inputs (N ≥ 10⁷): throughput plateaus at the memory-bandwidth
+   ceiling**, flat because the DRAM bandwidth is the binding resource, not
+   the algorithm — exactly why curves level off instead of climbing forever.
+
+### Why Boyer-Moore dominates the throughput comparison
+
+BM's bad-character/good-suffix heuristics **skip windows entirely** on
+random text, so serially it already achieves ~0.66 GB/s (short pattern) and
+~1.47 GB/s (long pattern) — 3–8× the byte-at-a-time scans. With 16 threads
+at long-pattern N = 100M it sustains **3.07 GB/s**, the highest of any
+configuration. The *long pattern* helps BM further: bigger m means longer
+jumps and fewer byte touches per window — and its curves are the ones whose
+peak sits highest above the dotted sequential line.
+
+Conversely, Rabin-Karp has the *lowest* throughput (0.04–0.07 GB/s serially):
+its two modular multiply/modulo operations per character give no skipping at
+all, so it is compute-bound from the first byte and gains the least from
+threading (its peak parallel config is also the smallest, P = 8, beyond which
+extra threads add overhead without adding work).
+*
+
+## 6. Boyer-Moore source notes
+
+* `parallel_bm.cpp` is the benchmark executable: it contains a byte-oriented
+  port of the `bm::` library routines (`buildBadCharTable`,
+  `buildGoodSuffixTable`, chunked search) so the exact same logic runs on
+  toolchains (MinGW.org g++ 6.3, no `std::string_view`, no `std::thread`) —
+  `boyer_moore.cpp` itself still builds as the library baseline on modern
+  compilers, with the reconstructed `boyer_moore.h`.
+* The old `parallel_bm` skeleton requiring a non-existent `ThreadPool` /
+  `parallel_bm.h` was replaced by the self-contained executable; same CLI and
+  CSV line (`bm,<threads>,<N>,<M>,<time_ms>,<matches>,<verified>`) as the
+  KMP and Rabin-Karp benchmarks.
