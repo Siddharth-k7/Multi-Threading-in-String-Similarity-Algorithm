@@ -238,3 +238,83 @@ void run_kmp_test(const char *test_title, const char *text, const char *pattern)
         thread_data[i].match_capacity = 16;
         thread_data[i].local_matches = (int *)malloc((size_t)thread_data[i].match_capacity * sizeof(int));
         if (thread_data[i].local_matches == NULL) {
+            fprintf(stderr, "Error: Memory allocation failed for thread %d match storage.\n", i);
+            for (int k = 0; k < i; k++) {
+                free(thread_data[k].local_matches);
+            }
+            free(lps);
+            return;
+        }
+
+        int search_len = (search_end >= search_start) ? (search_end - search_start + 1) : 0;
+        printf("Thread %d: Original [%2d..%2d] | Search Region [%2d..%2d] -> \"%.*s\"\n",
+               i, orig_start, orig_end, search_start, search_end, search_len,
+               (n > 0 && search_start < n ? &text[search_start] : ""));
+    }
+
+    // Launch worker threads safely
+    int threads_created = 0;
+    bool create_failed = false;
+    for (int i = 0; i < active_threads; i++) {
+        if (pthread_create(&threads[i], NULL, threadKMPsearch, &thread_data[i]) != 0) {
+            perror("Error: pthread_create failed");
+            create_failed = true;
+            break;
+        }
+        threads_created++;
+    }
+
+    // Wait for all successfully spawned worker threads to complete
+    for (int i = 0; i < threads_created; i++) {
+        if (pthread_join(threads[i], NULL) != 0) {
+            perror("Error: pthread_join failed");
+        }
+    }
+
+    if (create_failed) {
+        fprintf(stderr, "Aborting test due to thread creation failure.\n");
+        for (int i = 0; i < active_threads; i++) {
+            free(thread_data[i].local_matches);
+        }
+        free(lps);
+        return;
+    }
+
+    // Collect matches from thread-local buffers
+    int combined_capacity = 16;
+    int total_parallel_matches = 0;
+    int *combined_matches = (int *)malloc((size_t)combined_capacity * sizeof(int));
+    if (combined_matches == NULL) {
+        fprintf(stderr, "Error: Memory allocation failed for combined matches.\n");
+        for (int i = 0; i < active_threads; i++) {
+            free(thread_data[i].local_matches);
+        }
+        free(lps);
+        return;
+    }
+
+    printf("\n--- Thread-Local Search Results ---\n");
+    for (int i = 0; i < active_threads; i++) {
+        printf("Thread %d found %d match(es): ", i, thread_data[i].match_count);
+        if (thread_data[i].match_count == 0) {
+            printf("None\n");
+        } else {
+            for (int k = 0; k < thread_data[i].match_count; k++) {
+                int pos = thread_data[i].local_matches[k];
+                printf("%d ", pos);
+                if (total_parallel_matches >= combined_capacity) {
+                    int new_cap = combined_capacity * 2;
+                    int *temp = (int *)realloc(combined_matches, (size_t)new_cap * sizeof(int));
+                    if (temp == NULL) {
+                        fprintf(stderr, "Error: Memory reallocation failed for combined matches.\n");
+                        break;
+                    }
+                    combined_matches = temp;
+                    combined_capacity = new_cap;
+                }
+                combined_matches[total_parallel_matches++] = pos;
+            }
+            printf("\n");
+        }
+    }
+
