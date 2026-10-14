@@ -88,3 +88,93 @@ Repetition count is adaptive (5 for tiny N, 2 for huge N); the best (minimum)
 repetition is reported to filter scheduler noise.
 
 ## 4. Measured results (this machine: Intel Tiger Lake, 8 logical cores, M = 5)
+
+All parallel runs across all three algorithms verified **identical** to serial
+(same match count and indices).
+
+### Execution time (ms) — latest sweep
+
+| N | serial | P=2 | P=8 | P=16 | P=32 | P=128 | P=1024 |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10,000,000 KMP | 56.83 | — | 17.15 | 15.87 | 17.92 | — | ~64 |
+| 10,000,000 RK | 173.7 | — | 46.68 | 45.66 | 51.73 | — | ~139 |
+| 10,000,000 BM | 31.57 | 19.68 | 11.42 | **8.71** | 14.37 | 17.49 | 62.77 |
+| 1,000,000 BM | 2.407 | 1.876 | 1.362 | — | 1.778 | 6.673 | 60.10 |
+| 100,000 BM | 0.226 | 0.321 | 0.698 | — | 1.764 | 8.073 | 60.60 |
+
+### Speedup S(P) = T_serial / T_parallel (efficiency E = S / P) at N = 10M
+
+| Algorithm | P=2 | P=8 | P=16 (best) | P=1024 |
+|---|---:|---:|---:|---:|
+| KMP | — | 3.31 (E .41) | **3.58** (E .22) | 0.89 (E .001) |
+| Rabin-Karp | — | 3.72 (E .47) | **3.80** (E .24) | 1.25 (E .001) |
+| Boyer-Moore | 1.60 | 2.76 (E .35) | **3.62** (E .23) | 0.50 (E .0005) |
+
+---
+
+## 5. Discussion Questions (three-algorithm edition)
+
+### 1. How does increasing the number of Pthreads affect execution time?
+
+For a **small fixed workload** the time *increases* with thread count. At
+N = 100,000 Boyer-Moore takes 0.226 ms serially but **60.6 ms with 1,024
+threads** (≈ 270× slower!), same as KMP/R-K: creating/joining 1,024 Win32
+threads costs ~55–60 ms, hundreds of times more than the search itself.
+
+For a **large fixed workload** the time first *decreases* as real cores work in
+parallel (BM at N = 10M: 31.6 ms → **8.7 ms** around P = 16), then it
+**plateaus and rises again** (at P = 1024 Boyer-Moore is *slower*: 62.8 ms vs
+31.6 ms serial). KMP reaches its floor near ≈ 15.9 ms and Rabin-Karp near
+≈ 45.7 ms; Boyer-Moore's scan jumps
+irregularly, which makes some threads do more work (heuristic shifts are
+data-dependent), so BM shows a bumpier curve: 8.7 @16, 9.1 @64, 14.4 @32,
+17.5 @128 in one sweep — a classic load-imbalance signature.
+
+So: three regimes — overhead-dominated (small N), beneficial (large N, P ≤
+several cores), and oversubscribed / imbalance-limited (P >> cores).
+
+### 2. Does the speedup increase linearly with the number of threads? Explain.
+
+No — speedup is only near-linear up to roughly the number of **physical
+cores**. At N = 10M on this 8-logical-core machine:
+
+* KMP: S ≈ 3.3 at P = 8, S ≈ 3.6 at P = 16, then the curve saturates around
+  3.6–3.8× for all three algorithms (RK: 3.80, BM: 3.62) and later decays
+  (KMP 0.89×, BM 0.50× at P = 1024).
+* Reasons:
+  * **Amdahl's law** — the inherently serial slice (pattern preprocessing,
+    partition setup, joins, merge, and — conceptually — any per-instance
+    startup) caps speedup below P.
+  * **Physical vs. logical cores** — beyond 4 physical cores the remaining
+    logical threads share execution units; adding threads adds no throughput.
+  * **Oversubscription** — with P ≫ cores the OS time-slices; the same total
+    work now includes context switches and scheduler overhead (Boyer-Moore
+    windows jump, and threads repeatedly lose their thermal/boost budget).
+  * **Memory bandwidth** — all threads stream the same text; for RK's
+    2 modular ops per character the scaling saturates a bit *earlier*
+    (S = 3.80 plateau) than for the branchy scans.
+
+### 3. What factors limit the achievable speedup?
+
+* **Serial fraction** (Amdahl): preprocessing (LPS / hash / BM tables — BM's
+  good-suffix build is the most expensive of the three), partition/arg setup,
+  joins and the final merge.
+* **Thread-management overhead**: `pthread_create`/`pthread_join` +
+  per-thread match buffers — visible as the ~55–60 ms floor at P = 1024 that
+  all three algorithms hit regardless of N.
+* **Memory bandwidth and cache**: text dominates; the DRAM bandwidth fills up
+  quickly with every thread streaming the same text array.
+* **Load imbalance**, strongest for **Boyer-Moore**: heuristic shifts are
+  data-dependent, so chunk finishing times vary (P = 16 vs. 32 inversion in
+  the BM table above). KMP/RK character-by-character scans balance perfectly.
+* **Physical vs. logical cores**, CPU boost/thermal budgets, and Windows
+  scheduler behavior at large P.
+* **False sharing** is deliberately avoided (thread-local buffers, read-only
+  shared inputs); without that design choice it would appear too.
+
+### 4. Why can efficiency decrease as the number of threads increases?
+
+Efficiency is E = S / P — the fraction of each added thread's capability that
+becomes useful throughput. As P grows:
+
+* per-thread work shrinks (N/P characters each) while **fixed overhead stays
