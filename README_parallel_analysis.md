@@ -178,3 +178,92 @@ Efficiency is E = S / P — the fraction of each added thread's capability that
 becomes useful throughput. As P grows:
 
 * per-thread work shrinks (N/P characters each) while **fixed overhead stays
+  constant** (partition, tables, join), so E ≥ 1/(1 + serial fraction × P)
+  decline toward 0 is expected mathematically;
+* thread creation/join cost is O(P), so for small N it dominates totally —
+  BM at N = 10M: E = 0.35 at P = 8, **0.0005 at P = 1024**;
+* beyond the core count E also decays ~cores/P because threads share cores;
+* Boyer-Moore efficiency drops *lower and noisier* than KMP/RK because window
+  skipping makes chunks unequal — some threads idle in the join while slow
+  chunks finish; adding threads then trims nothing while overhead grows.
+
+That is exactly what the efficiency chart shows for small-N curves: they
+collapse to ~0 even a few threads in, while the big-N curves keep a usable
+E ≈ 0.2–0.5 up to P ≈ cores and then slide to 0.
+
+### 5. Compare the performance of the serial and Pthreads implementations.
+
+* **Small N (≤ ~100,000): serial always wins for all three algorithms.**
+  BM N = 100k: 0.226 ms serial vs 1.76 ms at P = 32 and 60.6 ms at P = 1024.
+* **Crossover around N ≈ 10⁵–10⁶** (BM ≈ 700–800k chars to first outrun
+  serial with a handful of threads). Rabin-Karp, whose serial scan is the
+  heaviest, crosses over earliest and benefits most.
+* **Large N: parallel wins clearly.** N = 10M best results: BM 8.7 ms (3.6×),
+  KMP 15.9 ms (3.6×), RK 45.7 ms (3.8×) vs. serial 31.6 / 56.8 / 173.7 ms —
+  and the win grows with N since fixed overheads amortize. Parallelism pays
+  when the *problem* is big, not when the *thread count* is big.
+* **Serially, Boyer-Moore is the fastest of the three** (31.6 ms vs KMP's
+  56.8 and RK's 173.7 at N = 10M) thanks to sublinear window skipping on
+  random text. In parallel the three land surprisingly close (≈ 3.6–3.8×),
+  because they are all eventually bound by the same serial fraction, memory
+  bandwidth and core count rather than by algorithmic character.
+* **Correctness never traded for speed**: with verification enabled, *all*
+  parallel configurations of all three algorithms returned exactly the same
+  match indices as serial, on every N tested up to 10,000,000.
+* **Practical rule**: serial for small inputs; use
+  `min(P, physical cores, N / chunk_target)` threads for huge inputs; for
+  Boyer-Moore prefer slightly *fewer* threads than for KMP/RK since
+  imbalance wastes more of the pool.
+
+---* Timings are outputs of `run_benchmark.py` on the benchmark host; absolute
+numbers vary with CPU/OS, but the shapes (three regimes, plateau, efficiency
+collapse, imbalance ripple for BM) reproduce. Regenerate everything with the
+two commands in §3.
+
+---
+
+## 7. Granularity comparison — all three algorithms
+
+Chart: **`fig_granularity.png`** (data: `granularity.csv`), built with:
+
+```bash
+python run_granularity.py      # fixed N, fine thread ladder → grain = N/P
+python plot_granularity.py     # time / speedup / efficiency vs chars-per-thread
+```
+
+Method: for each fixed N (10⁶ and 10⁷), all three algorithms are run over a
+*fine ladder* of thread counts P = 1, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64, 128,
+256, 512, 1024, so the **grain size G = N/P** (characters per thread) spans
+from `N` (pure serial) down to ≈ 9,765 chars per thread. The U-curve of time
+vs grain plots the granularity trade-off directly:
+
+* **fine grain (small G, left side)** — thread-create/join/partition overhead
+  dominates; at G ≈ 9,765 chars all three algorithms take ~55–90 ms at
+  P = 1024 regardless of N (the creation floor measured in §5);
+* **coarse grain (large G, right side)** — too few threads, parallelism vanishes
+  and time returns to the serial baseline (dotted lines);
+* between them sits the **sweet spot G\*** where time bottoms out.
+
+### Measured sweet spots (best S found on the ladder)
+
+| N | algo | serial T (ms) | best P | grain G\* (chars/thread) | T (ms) | S | E |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 1,000,000 | KMP | 6.65 | 6 | 166,666 | 3.42 | 1.94 | 0.32 |
+| 1,000,000 | Rabin-Karp | 24.4 | 24 | 41,666 | 6.54 | 3.72 | 0.16 |
+| 1,000,000 | Boyer-Moore | 3.65 | 12 | 83,333 | 1.57 | 2.32 | 0.19 |
+| 10,000,000 | KMP | 81.4 | 24 | 416,666 | 21.6 | 3.77 | 0.16 |
+| 10,000,000 | Rabin-Karp | 243.3 | 12 | 833,333 | 68.1 | 3.57 | 0.30 |
+| 10,000,000 | Boyer-Moore | 39.5 | 24 | 416,666 | 7.8 | 5.08 | 0.21 |
+
+### Cross-algorithm granularity comparison
+
+* **Order of tolerance to *fine* grain:** Boyer-Moore ≈ KMP > Rabin-Karp.
+  BM tolerates the *finest* useful grain before collapsing (its windows
+  *skip*, so small chunks finish fast and overhead is the only real cost),
+  whereas Rabin-Karp pays 2 modular ops per character — the same G with 2×
+  the arithmetic work per operation makes its overhead wall arrive at the
+  same `P` but hurt *more*. This mirrors §5: RK's low serial cost per char
+  is also what overshoots at fine grains.
+* **Sweet-spot grain grows with N roughly proportionally:** G\* ≈ 83k for BM
+  at N = 10⁶ but ≈ 416k at N = 10⁷ — i.e., the *grain* sweet spot is set by
+  hardware (how long a chunk must be to amortize ~50–100 µs of create/join
