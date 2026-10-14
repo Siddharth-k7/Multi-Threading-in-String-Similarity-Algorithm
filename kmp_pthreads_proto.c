@@ -78,3 +78,83 @@ int KMPsearch(const char *text, int n, const char *pattern, int m, const int *lp
                 if (temp == NULL) {
                     fprintf(stderr, "Error: Memory reallocation failed for sequential matches.\n");
                     return *match_count;
+                }
+                *matches = temp;
+                capacity = new_cap;
+            }
+            (*matches)[(*match_count)++] = i - j;
+            // Use LPS to find the next possible match
+            j = lps[j - 1];
+        } else if (i < n && pattern[j] != text[i]) {
+            // Mismatch: shift pattern using LPS without backtracking text pointer i
+            if (j != 0) {
+                j = lps[j - 1];
+            } else {
+                i++;
+            }
+        }
+    }
+
+    return *match_count;
+}
+
+// Compatibility wrapper for sequential KMP
+int sequentialKMP(const char *text, int n, const char *pattern, int m, const int *lps, int **matches, int *match_count) {
+    return KMPsearch(text, n, pattern, m, lps, matches, match_count);
+}
+
+// Worker thread function: performs KMP search on the thread's assigned search region
+void *threadKMPsearch(void *arg) {
+    ThreadData *data = (ThreadData *)arg;
+    data->match_count = 0;
+
+    int m = data->pattern_len;
+    int i = data->search_start;  // Text index starts at the beginning of the search region
+    int j = 0;                   // Pattern index
+
+    while (i <= data->search_end) {
+        if (data->pattern[j] == data->text[i]) {
+            i++;
+            j++;
+        }
+
+        if (j == m) {
+            int match_index = i - j;  // Global starting index in full text
+
+            // Match Ownership Rule:
+            // Because adjacent search regions overlap by up to (m - 1) characters,
+            // two threads could both see the same occurrence of the pattern.
+            // To prevent duplicate recordings, a thread only records a match
+            // if its starting index falls inside this thread's original partition.
+            if (match_index >= data->original_start && match_index <= data->original_end) {
+                if (data->match_count >= data->match_capacity) {
+                    int new_cap = (data->match_capacity == 0) ? 16 : (data->match_capacity * 2);
+                    int *temp = (int *)realloc(data->local_matches, new_cap * sizeof(int));
+                    if (temp != NULL) {
+                        data->local_matches = temp;
+                        data->match_capacity = new_cap;
+                        data->local_matches[data->match_count++] = match_index;
+                    } else {
+                        fprintf(stderr, "Error: Memory reallocation failed in thread %d.\n", data->thread_id);
+                    }
+                } else {
+                    data->local_matches[data->match_count++] = match_index;
+                }
+            }
+
+            j = data->lps[j - 1];
+        } else if (i <= data->search_end && data->pattern[j] != data->text[i]) {
+            if (j != 0) {
+                j = data->lps[j - 1];
+            } else {
+                i++;
+            }
+        }
+    }
+
+    return NULL;
+}
+
+// Runs both multithreaded and sequential KMP on an input and verifies correctness
+void run_kmp_test(const char *test_title, const char *text, const char *pattern) {
+    if (text == NULL || pattern == NULL) {
