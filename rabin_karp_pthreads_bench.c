@@ -152,3 +152,80 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Usage: %s <num_threads> <N> [M] [reps] [verify]\n", argv[0]);
         return 1;
     }
+
+    /* Deterministic pattern and text generation (same seed => identical datasets) */
+    char pattern[257];
+    srand(123);
+    for (int i = 0; i < m; i++) pattern[i] = (char)('A' + rand() % 4);
+    pattern[m] = '\0';
+
+    char *text = (char *)malloc((size_t)n + 1);
+    if (text == NULL) {
+        fprintf(stderr, "Error: cannot allocate %lld bytes for text\n", n);
+        return 1;
+    }
+    srand(42);
+    for (long long i = 0; i < n; i++) text[i] = (char)('A' + rand() % 4);
+    /* Embed the pattern at fixed intervals so matches exist and grow with N.
+     * For tiny N where no full interval fits, embed once at position 0. */
+    long long interval = 1000;
+    if (n >= (long long)m) memcpy(text, pattern, (size_t)m);
+    for (long long i = interval; i + m <= n; i += interval) {
+        memcpy(&text[i], pattern, m);
+    }
+    text[n] = '\0';
+
+    /* Precompute pattern hash and BASE^(m-1) mod HASH_MOD */
+    long long pattern_hash = 0, highest_power = 1;
+    for (int i = 0; i < m; i++) {
+        pattern_hash = (HASH_BASE * pattern_hash + (unsigned char)pattern[i]) % HASH_MOD;
+        if (i > 0) highest_power = (highest_power * HASH_BASE) % HASH_MOD;
+    }
+
+    /* ---------- Run (serial or parallel) ---------- */
+    long long match_count = 0;
+    long long *all_matches = NULL;   /* sorted match indices (verification only) */
+    double best_time = -1.0;
+    int verified = 0;
+
+    if (num_threads_req == 1) {
+        /* SERIAL baseline */
+        MatchBuf serial;
+        serial.buf = NULL; serial.count = 0; serial.capacity = 0;
+
+        for (int r = 0; r < reps; r++) {
+            serial.count = 0;
+            double t0 = now_ms();
+            rk_scan(text, n, m, pattern, pattern_hash, highest_power, 0, n, &serial);
+            double t1 = now_ms();
+            double dt = t1 - t0;
+            if (best_time < 0 || dt < best_time) best_time = dt;
+        }
+        match_count = serial.count;
+        if (verify) {
+            all_matches = serial.buf;
+        } else {
+            free(serial.buf);
+        }
+    } else {
+        /* PARALLEL: partition + create + join + combine inside the timed region */
+        long long P = num_threads_req;
+        pthread_t *threads = (pthread_t *)malloc((size_t)P * sizeof(pthread_t));
+        ThreadData *tds    = (ThreadData *)malloc((size_t)P * sizeof(ThreadData));
+        long long *counts  = (long long *)calloc((size_t)P, sizeof(long long));
+        if (threads == NULL || tds == NULL || counts == NULL) {
+            fprintf(stderr, "Error: thread arrays allocation failed\n");
+            free(threads); free(tds); free(counts); free(text);
+            return 1;
+        }
+
+        for (int r = 0; r < reps; r++) {
+            for (long long i = 0; i < P; i++) {
+                tds[i].matches.buf = NULL;
+                tds[i].matches.count = 0;
+                tds[i].matches.capacity = 0;
+            }
+            match_count = 0;
+            double t0 = now_ms();
+
+            /* Partition the window-START space [0, n-m+1) into P contiguous chunks */
