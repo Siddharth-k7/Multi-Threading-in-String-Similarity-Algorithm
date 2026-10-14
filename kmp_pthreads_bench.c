@@ -82,3 +82,87 @@ static int kmp_scan(const char *text, long long start, long long end, int n,
     int count = 0;
     int j = 0;
     long long i = start;
+    while (i < end && i < n) {
+        if (pattern[j] == text[i]) {
+            i++;
+            j++;
+        }
+        if (j == m) {
+            long long match_start = i - j;
+            out[count++] = match_start;
+            j = lps[j - 1];
+        } else if (i < end && i < n && pattern[j] != text[i]) {
+            if (j != 0) {
+                j = lps[j - 1];
+            } else {
+                i++;
+            }
+        }
+    }
+    return count;
+}
+
+/* Growing per-thread match buffer */
+typedef struct {
+    long long *buf;
+    int count;
+    int capacity;
+} MatchBuf;
+
+static void buf_push(MatchBuf *b, long long v) {
+    if (b->count >= b->capacity) {
+        b->capacity = (b->capacity == 0) ? 64 : b->capacity * 2;
+        b->buf = (long long *)realloc(b->buf, (size_t)b->capacity * sizeof(long long));
+    }
+    b->buf[b->count++] = v;
+}
+
+/* ---------------- Serial baseline (threads = 1) ---------------- */
+
+/* ---------------- Parallel worker ---------------- */
+
+typedef struct {
+    int thread_id;
+    long long chunk_start;        /* start of ORIGINAL (non-overlapping) chunk, exclusive end given below */
+    long long chunk_end;          /* exclusive end of original chunk; matches must start < this */
+    long long search_end;         /* exclusive end of EXTENDED search region */
+    long long n;                  /* total text length */
+    const char *text;
+    const char *pattern;
+    int m;
+    const int *lps;
+    MatchBuf matches;
+    int was_created;              /* set to 1 if pthread_create succeeded */
+} ThreadData;
+
+static void *kmp_worker(void *arg) {
+    ThreadData *d = (ThreadData *)arg;
+    d->matches.buf = NULL;
+    d->matches.count = 0;
+    d->matches.capacity = 0;
+
+    /* Local scratch for matches in this region before ownership filtering */
+    long long scratch_cap = 64;
+    long long *scratch = (long long *)malloc((size_t)scratch_cap * sizeof(long long));
+    if (scratch == NULL) {
+        fprintf(stderr, "Error: allocation failed in thread %d\n", d->thread_id);
+        return NULL;
+    }
+
+    /* Scan extended region only if it can contain a full pattern */
+    if (d->search_end - d->chunk_start >= d->m) {
+        long long search_end_min = d->search_end < d->n ? d->search_end : d->n;
+        /* scan needs to look at most m-1 chars past the exclusive scan end */
+        long long scan_end = search_end_min + d->m - 1;
+        if (scan_end > d->n) scan_end = d->n;
+
+        /* Over-allocate scratch generously: expected matches are few but be safe */
+        long long expected = (scan_end - d->chunk_start) / d->m + 2;
+        if (expected > scratch_cap) {
+            scratch = (long long *)realloc(scratch, (size_t)expected * sizeof(long long));
+            scratch_cap = expected;
+            if (scratch == NULL) { fprintf(stderr, "Error: realloc failed in thread %d\n", d->thread_id); return NULL; }
+        }
+
+        int cnt = kmp_scan(d->text, d->chunk_start, scan_end, d->n,
+                           d->pattern, d->m, d->lps, scratch);
