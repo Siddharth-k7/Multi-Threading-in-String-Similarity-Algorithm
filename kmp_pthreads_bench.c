@@ -166,3 +166,87 @@ static void *kmp_worker(void *arg) {
 
         int cnt = kmp_scan(d->text, d->chunk_start, scan_end, d->n,
                            d->pattern, d->m, d->lps, scratch);
+        for (int k = 0; k < cnt; k++) {
+            if (scratch[k] < d->chunk_end) {        /* Ownership rule: no duplicates */
+                buf_push(&d->matches, scratch[k]);
+            }
+        }
+    }
+    free(scratch);
+    return NULL;
+}
+
+int main(int argc, char **argv) {
+    long long num_threads_req = argc > 1 ? atoll(argv[1]) : 4;
+    long long n               = argc > 2 ? atoll(argv[2]) : 1000000;
+    int m                     = argc > 3 ? atoi(argv[3]) : 5;
+    int reps                  = argc > 4 ? atoi(argv[4]) : 3;
+    int verify                = argc > 5 ? atoi(argv[5]) : 0;
+
+    if (num_threads_req < 1 || n < 1 || m < 1 || m > 256 || reps < 1) {
+        fprintf(stderr, "Usage: %s <num_threads> <N> [M] [reps] [verify]\n", argv[0]);
+        return 1;
+    }
+    if (num_threads_req * (m - 1 + 1) > 4LL * 1024 * 1024 * 1024) {
+        fprintf(stderr, "Thread count far exceeds text size.\n");
+    }
+
+    /* Deterministic pattern and text generation (same seed => identical datasets) */
+    char pattern[257];
+    srand(123);
+    for (int i = 0; i < m; i++) pattern[i] = (char)('A' + rand() % 4);
+    pattern[m] = '\0';
+
+    char *text = (char *)malloc((size_t)n + 1);
+    if (text == NULL) {
+        fprintf(stderr, "Error: cannot allocate %lld bytes for text\n", n);
+        return 1;
+    }
+    srand(42);
+    for (long long i = 0; i < n; i++) text[i] = (char)('A' + rand() % 4);
+    /* Embed the pattern at fixed intervals so matches exist and grow with N.
+     * For tiny N where no full interval fits, embed once at position 0. */
+    long long interval = 1000;
+    if (n >= (long long)m) memcpy(text, pattern, (size_t)m);
+    for (long long i = interval; i + m <= n; i += interval) {
+        memcpy(&text[i], pattern, m);
+    }
+    text[n] = '\0';
+
+    int *lps = (int *)malloc((size_t)m * sizeof(int));
+    buildLPS(pattern, m, lps);
+
+    /* ---------- Run (serial or parallel) ---------- */
+    long long match_count = 0;
+    long long *all_matches = NULL;   /* sorted match indices (verification) */
+    double best_time = -1.0;
+    int verified = 0;
+
+    if (num_threads_req == 1) {
+        /* SERIAL baseline */
+        long long cap = n / interval + (n / (m * 64) + 16);
+        all_matches = (long long *)malloc((size_t)cap * sizeof(long long));
+        if (all_matches == NULL) { fprintf(stderr, "Error: alloc serial matches\n"); return 1; }
+
+        for (int r = 0; r < reps; r++) {
+            match_count = 0;
+            double t0 = now_ms();
+            match_count = kmp_scan(text, 0, n, n, pattern, m, lps, all_matches);
+            double t1 = now_ms();
+            double dt = t1 - t0;
+            if (best_time < 0 || dt < best_time) best_time = dt;
+        }
+    } else {
+        /* PARALLEL: partition + create + join + combine inside the timed region */
+        long long P = num_threads_req;
+        pthread_t *threads = (pthread_t *)malloc((size_t)P * sizeof(pthread_t));
+        ThreadData *tds    = (ThreadData *)malloc((size_t)P * sizeof(ThreadData));
+        if (threads == NULL || tds == NULL) { fprintf(stderr, "Error: thread arrays alloc\n"); return 1; }
+
+        /* counts buffer to sum after joining */
+        long long *counts = (long long *)calloc((size_t)P, sizeof(long long));
+        if (counts == NULL) { fprintf(stderr, "Error: counts alloc\n"); return 1; }
+
+        for (int r = 0; r < reps; r++) {
+            for (long long i = 0; i < P; i++) {
+                tds[i].matches.buf = NULL;
