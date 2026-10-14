@@ -250,3 +250,86 @@ int main(int argc, char **argv) {
         for (int r = 0; r < reps; r++) {
             for (long long i = 0; i < P; i++) {
                 tds[i].matches.buf = NULL;
+                tds[i].matches.count = 0;
+                tds[i].matches.capacity = 0;
+            }
+            match_count = 0;
+            double t0 = now_ms();
+
+            long long base = n / P, rem = n % P, cur = 0;
+            for (long long i = 0; i < P; i++) {
+                long long len = base + (i < rem ? 1 : 0);
+                tds[i].thread_id   = (int)i;
+                tds[i].chunk_start = cur;
+                tds[i].chunk_end   = cur + len;
+                /* Extended search region: + (m - 1) chars overlap */
+                long long se = tds[i].chunk_end + (m - 1);
+                tds[i].search_end  = se;
+                tds[i].n = n;
+                tds[i].text = text;
+                tds[i].pattern = pattern;
+                tds[i].m = m;
+                tds[i].lps = lps;
+                cur += len;
+                tds[i].was_created = (pthread_create(&threads[i], NULL, kmp_worker, &tds[i]) == 0);
+                if (!tds[i].was_created) {
+                    fprintf(stderr, "Error: pthread_create failed for thread %lld\n", i);
+                }
+            }
+            for (long long i = 0; i < P; i++) {
+                if (tds[i].was_created) {
+                    pthread_join(threads[i], NULL);
+                    counts[i] = tds[i].matches.count;
+                } else {
+                    counts[i] = 0;
+                }
+            }
+            /* Combine: chunks are contiguous ascending ranges => concatenation is sorted */
+            long long total = 0;
+            for (long long i = 0; i < P; i++) total += counts[i];
+            match_count = total;
+
+            /* Collect combined indices on final rep for verification */
+            if (r == reps - 1 && verify) {
+                all_matches = (long long *)malloc((size_t)(total > 0 ? total : 1) * sizeof(long long));
+                long long offs = 0;
+                for (long long i = 0; i < P; i++) {
+                    for (int k = 0; k < tds[i].matches.count; k++) {
+                        all_matches[offs++] = tds[i].matches.buf[k];
+                    }
+                }
+            }
+
+            double t1 = now_ms();
+            double dt = t1 - t0;
+            if (best_time < 0 || dt < best_time) best_time = dt;
+
+            for (long long i = 0; i < P; i++) {
+                free(tds[i].matches.buf);
+                tds[i].matches.buf = NULL;
+            }
+        }
+        free(threads); free(tds); free(counts);
+    }
+
+    /* ---------- Verification against serial ---------- */
+    if (verify && num_threads_req != 1 && all_matches != NULL) {
+        long long cap = n / interval + (n / (m * 64) + 16);
+        long long *seq_matches = (long long *)malloc((size_t)cap * sizeof(long long));
+        if (seq_matches != NULL) {
+            long long seq_count = kmp_scan(text, 0, n, n, pattern, m, lps, seq_matches);
+            verified = (match_count == seq_count);
+            for (long long k = 0; verified && k < seq_count; k++) {
+                if (seq_matches[k] != all_matches[k]) verified = 0;
+            }
+            free(seq_matches);
+        }
+    }
+    if (all_matches) { free(all_matches); all_matches = NULL; }
+
+    printf("kmp,%lld,%lld,%d,%.6f,%lld,%d\n",
+           num_threads_req, n, m, best_time, match_count, verified);
+
+    free(text); free(lps);
+    return 0;
+}
