@@ -229,3 +229,79 @@ int main(int argc, char **argv) {
             double t0 = now_ms();
 
             /* Partition the window-START space [0, n-m+1) into P contiguous chunks */
+            long long W = n - m + 1; if (W < 1) W = 1;
+            long long base = W / P, rem = W % P, cur = 0;
+            for (long long i = 0; i < P; i++) {
+                long long len = base + (i < rem ? 1 : 0);
+                tds[i].thread_id     = (int)i;
+                tds[i].chunk_start   = cur;
+                tds[i].chunk_end     = cur + len;
+                tds[i].n             = n;
+                tds[i].m             = m;
+                tds[i].pattern_hash  = pattern_hash;
+                tds[i].highest_power = highest_power;
+                tds[i].text          = text;
+                tds[i].pattern       = pattern;
+                cur += len;
+                tds[i].was_created = (pthread_create(&threads[i], NULL, rk_worker, &tds[i]) == 0);
+                if (!tds[i].was_created) {
+                    fprintf(stderr, "Error: pthread_create failed for thread %lld\n", i);
+                }
+            }
+            for (long long i = 0; i < P; i++) {
+                if (tds[i].was_created) {
+                    pthread_join(threads[i], NULL);
+                }
+                counts[i] = tds[i].matches.count;
+            }
+            /* Combine: chunks are contiguous ascending ranges => concatenation is sorted */
+            long long total = 0;
+            for (long long i = 0; i < P; i++) total += counts[i];
+            match_count = total;
+
+            /* Collect combined indices on the final repetition for verification */
+            if (r == reps - 1 && verify) {
+                all_matches = (long long *)malloc((size_t)(total > 0 ? total : 1) * sizeof(long long));
+                if (all_matches != NULL) {
+                    long long offs = 0;
+                    for (long long i = 0; i < P; i++) {
+                        for (long long k = 0; k < tds[i].matches.count; k++) {
+                            all_matches[offs++] = tds[i].matches.buf[k];
+                        }
+                    }
+                }
+            }
+
+            double t1 = now_ms();
+            double dt = t1 - t0;
+            if (best_time < 0 || dt < best_time) best_time = dt;
+
+            for (long long i = 0; i < P; i++) {
+                free(tds[i].matches.buf);
+                tds[i].matches.buf = NULL;
+            }
+        }
+        free(threads); free(tds); free(counts);
+    }
+
+    /* ---------- Verification against serial ---------- */
+    if (verify && num_threads_req != 1 && all_matches != NULL) {
+        MatchBuf serial;
+        serial.buf = NULL; serial.count = 0; serial.capacity = 0;
+        rk_scan(text, n, m, pattern, pattern_hash, highest_power, 0, n, &serial);
+        verified = (serial.count == match_count);
+        if (verified) {
+            for (long long k = 0; k < serial.count; k++) {
+                if (serial.buf[k] != all_matches[k]) { verified = 0; break; }
+            }
+        }
+        free(serial.buf);
+    }
+    if (all_matches) { free(all_matches); all_matches = NULL; }
+
+    printf("rk,%lld,%lld,%d,%.6f,%lld,%d\n",
+           num_threads_req, n, m, best_time, match_count, verified);
+
+    free(text);
+    return 0;
+}
