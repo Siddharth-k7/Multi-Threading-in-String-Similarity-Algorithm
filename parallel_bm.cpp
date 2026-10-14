@@ -82,3 +82,87 @@ static void build_good_suffix(const char *pattern, int m, int *good) {
             suffixes[i] = f - g;
         }
     }
+
+    for (int i = 0; i < m; i++) good[i] = m;
+
+    int j = 0;
+    for (int i = m - 1; i >= 0; i--) {
+        if (suffixes[i] == i + 1) {
+            for (; j < m - 1 - i; j++) {
+                if (good[j] == m) good[j] = m - 1 - i;
+            }
+        }
+    }
+    for (int i = 0; i <= m - 2; i++) {
+        good[m - 1 - suffixes[i]] = m - 1 - i;
+    }
+    free(suffixes);
+}
+
+/* ---------------- Match buffer ---------------- */
+
+typedef struct {
+    long long *buf;
+    long long count;
+    long long capacity;
+} MatchBuf;
+
+static void buf_push(MatchBuf *b, long long v) {
+    if (b->count >= b->capacity) {
+        b->capacity = (b->capacity == 0) ? 64 : b->capacity * 2;
+        b->buf = (long long *)realloc(b->buf, (size_t)b->capacity * sizeof(long long));
+    }
+    b->buf[b->count++] = v;
+}
+
+/* ---------------- BM scan over window-START range [start, stop) ----------------
+ * start: first window START position to examine (owned chunk start)
+ * stop : exclusive end of owned window START positions
+ * Every occurrence whose start index is in [start, stop) is reported.   */
+static long long bm_scan(const char *text, long long n, int m, const char *pattern,
+                         const int *badChar, const int *good,
+                         MatchBuf *out, long long start, long long stop) {
+    long long count = 0;
+    if (m < 1) return 0;
+
+    long long hi = stop - 1;
+    if (hi > n - m) hi = n - m;              /* window must fit inside text */
+    long long s = start;
+    if (s > hi) return 0;
+
+    while (s <= hi) {
+        int j = m - 1;
+        /* compare right-to-left (Boyer-Moore signature) */
+        while (j >= 0 && pattern[j] == text[s + j]) j--;
+
+        if (j < 0) {
+            /* full match */
+            buf_push(out, s);
+            count++;
+            s += good[0];
+        } else {
+            int bad_shift = j - badChar[(unsigned char)text[s + j]];
+            int shift = (bad_shift > good[j]) ? bad_shift : good[j];
+            if (shift < 1) shift = 1;        /* safety: advance at least one */
+            s += shift;
+        }
+    }
+    return count;
+}
+
+/* ---------------- Parallel worker ---------------- */
+
+typedef struct {
+    int thread_id;
+    long long chunk_start;   /* first window START position owned by this thread */
+    long long chunk_end;     /* exclusive end of owned window START positions */
+    long long n;
+    int m;
+    const char *text;
+    const char *pattern;
+    const int *badChar;
+    const int *good;
+    MatchBuf matches;
+    int was_created;
+} ThreadData;
+
