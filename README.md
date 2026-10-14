@@ -64,3 +64,12 @@ gcc -Wall -Wextra kmp_pthreads_proto.c -o kmp_pthreads_proto -pthread
 ## 6. Conclusion
 
 This project implements sequential KMP and its multithreaded extension using POSIX Pthreads. Boundary handling extends search regions by up to $m - 1$ characters while assigning match ownership to the original partition, successfully preventing duplicate matches in overlapping regions. Correctness testing confirmed identical match indices between sequential and multithreaded executions, and sequential benchmarking established baseline performance.
+
+---
+
+## 7. Benchmark Suite
+
+- `run_benchmark.py` drives text-size scaling runs and writes `results.csv`.
+- `run_granularity.py` sweeps chunk sizes into `granularity.csv`.
+- `run_throughput.py` sweeps thread counts into `throughput.csv`.
+- `plot_benchmark.py`, `plot_granularity.py`, `plot_throughput.py` regenerate all `fig_*.png` charts.
