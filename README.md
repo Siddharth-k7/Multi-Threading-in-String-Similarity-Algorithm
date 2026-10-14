@@ -73,3 +73,12 @@ This project implements sequential KMP and its multithreaded extension using POS
 - `run_granularity.py` sweeps chunk sizes into `granularity.csv`.
 - `run_throughput.py` sweeps thread counts into `throughput.csv`.
 - `plot_benchmark.py`, `plot_granularity.py`, `plot_throughput.py` regenerate all `fig_*.png` charts.
+
+---
+
+## 8. Parallel Algorithms Covered
+
+- Serial baselines: `kmp.c`, `boyer_moore.cpp`, `Rabin-Karp-Algo.cpp`.
+- Pthread benchmarks: `kmp_pthreads_bench.c`, `rabin_karp_pthreads_bench.c`, `parallel_bm.cpp`.
+- Prototype and demos: `kmp_pthreads_proto.c`, `boundary_demo.c`, `pthread_demo.c`.
+- Full analysis with figures: `README_parallel_analysis.md`.
